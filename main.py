@@ -12,9 +12,7 @@ from dobot_api import DobotApiFeedBack, DobotApiDashboard
 
 # 全局变量，用于线程间通信
 arm_status_dict = {}  # 机械臂状态字典
-arm_configs_list = {}  # 存储当前轮次机械臂对应的运行参数 {ip: (script, delay)}
 arm_status_lock = threading.Lock()  # 状态字典的线程锁
-arm_configs_lock = threading.Lock()  # 配置字典的线程锁
 
 
 class DobotDemo:
@@ -103,8 +101,7 @@ class ArmController:
     """
     机械臂控制类 - 负责启动脚本以及TCP通信
     """
-
-    def __init__(self, robot_ip, script_name="part1"):
+    def __init__(self, robot_ip, script_name):
         self.robot_ip = robot_ip
         self.script_name = script_name
         self.dobotdemo = DobotDemo(self.robot_ip)
@@ -346,53 +343,48 @@ class TCPCoordinator:
         print(f"成功接收 {len(self.connected_controllers)} 个机械臂的start信号")
         return len(self.connected_controllers) > 0
 
-    def execute_round(self, round_configs, round_index, robot_ips, step_delay):
+    def execute_round(self, round_index, robot_ips, step_delay):
         """执行一轮操作"""
-        print(f"\n开始第{round_index + 1}轮TCP通信")
+        script = round_index + 1
+        print(f"\n开始第{script}轮TCP通信")
 
         # 发送前等待指定延时
         print(f"等待 {step_delay} 秒后发送命令...")
         sleep(step_delay)
 
-        # 处理当前轮次配置到字典
-        process_current_round_configs(round_configs, round_index)
-
         # 使用线程池并行执行所有机械臂的命令
         with concurrent.futures.ThreadPoolExecutor(max_workers=len(self.connected_controllers)) as executor:
             future_to_controller = {}
             for controller in self.connected_controllers:
-                with arm_configs_lock:
-                    if controller.robot_ip in arm_configs_list:
-                        with arm_status_lock:
-                            arm_status_dict[controller.robot_ip] = "RUNNING"
-                        script, delay = arm_configs_list[controller.robot_ip]
-                        future = executor.submit(controller.send_script_command, script)
-                        future_to_controller[future] = (controller, script)
-                    else:
-                        print(f"机械臂{controller.robot_ip}: 配置中找不到该IP，跳过")
-                        continue
+                with arm_status_lock:
+                    arm_status_dict[controller.robot_ip] = "RUNNING"
+                
+                # 直接使用轮数作为脚本代号
+                future = executor.submit(controller.send_script_command, script)
+                future_to_controller[future] = controller
 
             # 等待所有任务完成
             for future in concurrent.futures.as_completed(future_to_controller):
-                controller, script = future_to_controller[future]
+                controller = future_to_controller[future]
                 try:
                     result = future.result()
                     if result:
-                        print(f"机械臂{controller.robot_ip}: 第{round_index + 1}轮操作完成")
+                        print(f"机械臂{controller.robot_ip}: 第{script}轮操作完成")
                         with arm_status_lock:
                             arm_status_dict[controller.robot_ip] = "PAUSE"
                     else:
-                        print(f"机械臂{controller.robot_ip}: 第{round_index + 1}轮操作失败")
+                        print(f"机械臂{controller.robot_ip}: 第{script}轮操作失败")
                 except Exception as e:
-                    print(f"机械臂{controller.robot_ip}: 第{round_index + 1}轮操作异常: {e}")
+                    print(f"机械臂{controller.robot_ip}: 第{script}轮操作异常: {e}")
 
             # 等待所有机械臂完成操作
-            print(f"等待第{round_index + 1}轮所有机械臂完成操作...")
-            robot_ips = [c.robot_ip for c in self.connected_controllers]
-            if not wait_for_all_arms_status("PAUSE", robot_ips, timeout=300):
-                print(f"第{round_index + 1}轮操作等待超时")
+            print(f"等待第{script}轮所有机械臂完成操作...")
+            # 这里的 robot_ips 使用传入的或者当前连接的
+            current_ips = [c.robot_ip for c in self.connected_controllers]
+            if not wait_for_all_arms_status("PAUSE", current_ips, timeout=300):
+                print(f"第{script}轮操作等待超时")
 
-            print(f"第{round_index + 1}轮完成")
+            print(f"第{script}轮完成")
 
     def close_all_connections(self):
         """关闭所有TCP连接"""
@@ -437,26 +429,6 @@ class StateMonitor(threading.Thread):
     def stop(self):
         """停止监控线程"""
         self.shutdown_event.set()
-
-
-def process_current_round_configs(round_data, round_index):
-    """
-    处理当前轮次的配置，覆盖字典内容
-    """
-    global arm_configs_list
-
-    print(f"处理第{round_index + 1}轮数据，包含{len(round_data)}个配置项")
-
-    with arm_configs_lock:
-        arm_configs_list.clear()
-
-        for ip, script, delay in round_data:
-            arm_configs_list[ip] = (script, delay)
-
-    print("-" * 50)
-    print(f"当前轮次字典内容: {arm_configs_list}")
-    print("-" * 50)
-    return arm_configs_list
 
 
 def wait_for_all_arms_status(desired_status, robot_ips, timeout=60):
@@ -550,41 +522,6 @@ def filter_reachable_ips(ip_list):
     return reachable_ips, unreachable_ips
 
 
-def filter_configs_by_reachable_ips(configs, reachable_ips):
-    """
-    根据可达IP列表过滤配置
-    """
-    filtered_configs = []
-    reachable_set = set(reachable_ips)
-
-    for round_configs in configs:
-        filtered_round = []
-        for ip, script, delay in round_configs:
-            if ip in reachable_set:
-                filtered_round.append((ip, script, delay))
-        if filtered_round:
-            filtered_configs.append(filtered_round)
-
-    print(f"配置过滤完成: 原始{len(configs)}轮 -> 过滤后{len(filtered_configs)}轮")
-    return filtered_configs
-
-
-def generate_configs_from_parameters(ip_list, total_steps, step_delay):
-    """
-    根据IP列表、总步数和步间延时生成配置
-    """
-    configs = []
-
-    for step in range(1, total_steps + 1):
-        round_configs = []
-        for ip in ip_list:
-            round_configs.append((ip, step, step_delay))
-        configs.append(round_configs)
-
-    print(f"生成配置: {len(configs)}轮, 每轮{len(ip_list)}个机械臂, 总步数{total_steps}, 步间延时{step_delay}秒")
-    return configs
-
-
 def main():
     """
     主函数 - 完整的机械臂控制流程
@@ -599,16 +536,8 @@ def main():
 
     total_steps = 17  # 总共发送的步数（从1开始到17）
     step_delay = 0.01  # 每次发送前的延时（秒）
+    script_name = "part1"
     # ========================= 参数设置结束 =========================
-
-    # 根据参数生成配置
-    configs = generate_configs_from_parameters(robot_ips, total_steps, step_delay)
-
-    if not configs:
-        print("没有生成有效的机械臂配置，程序退出。")
-        return
-
-    print(f"生成 {len(configs)} 轮配置，涉及 {len(robot_ips)} 个机械臂")
 
     # 检测IP连通性并过滤
     reachable_ips, unreachable_ips = filter_reachable_ips(robot_ips)
@@ -617,14 +546,12 @@ def main():
         print("没有可达的机械臂IP，程序退出。")
         return
 
-    # 根据可达IP过滤配置
-    configs = filter_configs_by_reachable_ips(configs, reachable_ips)
     robot_ips = reachable_ips  # 更新为可达的IP列表
 
     # 创建控制器实例（只创建可达IP的控制器）
     controllers = []
     for ip in robot_ips:
-        controller = ArmController(ip)
+        controller = ArmController(ip, script_name)
         controller.is_reachable = True
         controllers.append(controller)
 
@@ -644,7 +571,7 @@ def main():
 
     # 第一阶段：同时启动所有机械臂的统一脚本
     print("=" * 60)
-    print("第一阶段: 启动所有机械臂的统一脚本")
+    print("第一阶段: 启动脚本")
     print("=" * 60)
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=len(controllers)) as executor:
@@ -665,59 +592,53 @@ def main():
         print("等待机械臂就绪超时，程序退出")
         return
 
-    # 一轮控制，连接脚本的TCP服务
-    start_or_stop = int(input("输入1结束程序，其他则继续运行"))
+    # 第二阶段：建立modbus通讯
+    print("\n" + "=" * 60)
+    print("第二阶段: 建立modbus通讯")
+    print("=" * 60)
 
-    if start_or_stop == 1:
-        # 第二阶段：按轮次执行TCP通信
-        print("\n" + "=" * 60)
-        print("第二阶段: 按轮次执行TCP通信")
-        print("=" * 60)
-
-        # 在第二阶段开始前建立所有TCP连接
-        coordinator = TCPCoordinator(controllers)
-        if not coordinator.prepare_all_connections():
-            print("TCP连接准备失败，跳过第二阶段")
-        else:
-            # 等待所有机械臂发送start信号
-            if not coordinator.wait_for_all_start_signals():
-                print("等待start信号失败，跳过第二阶段")
-            else:
-                # 二轮控制，是否进行舞蹈动作
-                a = int(input("请输入1以开始"))  # 输入1则继续程序，输入0则关闭脚本，关闭程序
-                if a == 1:
-                    for round_index, round_configs in enumerate(configs):
-                        coordinator.execute_round(round_configs, round_index, robot_ips, step_delay)
-                        print("-" * 40)
-
-                    # 停止脚本的运行，结束机械臂创建的tcp连接
-                    for controller in controllers:
-                        controller.stop()
-
-                else:
-                    for controller in controllers:
-                        controller.stop()
-                    exit()
-
-            # 所有轮次完成后关闭连接
-            coordinator.close_all_connections()
-
-        print("所有轮次操作完成！")
-        print("\n已结束所有脚本！")
-
-        # 清理工作
-        print("执行清理工作...")
-        monitor_thread.stop()
-        monitor_thread.join(timeout=2.0)
-
-        for controller in controllers:
-            try:
-                controller.close_connections()
-            except Exception as e:
-                print(f"清理机械臂 {controller.robot_ip} 资源时出错: {e}")
+    # 建立所有modbus连接
+    coordinator = TCPCoordinator(controllers)
+    if not coordinator.prepare_all_connections():
+        print("modbus连接失败，跳过第三阶段")
     else:
-        for controller in controllers:
-            controller.stop()
+        # 等待所有机械臂发送start信号
+        if not coordinator.wait_for_all_start_signals():
+            print("等待start信号失败，跳过第三阶段")
+        else:
+            # 第三阶段，同步动作阶段
+            print("通讯准备就绪，是否开始同步动作。")
+            a = int(input("输入1开始同步动作"))  # 输入1则继续程序，输入0则关闭脚本，关闭程序
+            if a == 1:
+                for round_index in range(total_steps):
+                    coordinator.execute_round(round_index, robot_ips, step_delay)
+                    print("-" * 40)
+
+                # 停止脚本的运行，结束机械臂创建的tcp连接
+                for controller in controllers:
+                    controller.stop()
+
+            else:
+                for controller in controllers:
+                    controller.stop()
+                exit()
+
+        # 所有轮次完成后关闭连接
+        coordinator.close_all_connections()
+
+    print("所有轮次操作完成！")
+    print("\n已结束所有脚本！")
+
+    # 清理工作
+    print("执行清理工作...")
+    monitor_thread.stop()
+    monitor_thread.join(timeout=2.0)
+
+    for controller in controllers:
+        try:
+            controller.close_connections()
+        except Exception as e:
+            print(f"清理机械臂 {controller.robot_ip} 资源时出错: {e}")
 
 
 if __name__ == '__main__':
