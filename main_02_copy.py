@@ -108,10 +108,6 @@ class DobotDemo:
 class ArmController:
     """
     机械臂控制类 - 负责启动脚本以及TCP通信
-    part1 :上壁板8-----test_12
-    part2 :上壁板19
-    part3 :下壁板8-----test_12_17
-    part4 :下壁板19----test_12_12
     """
 
     def __init__(self, robot_ip, script_name="part1"):      # part1、part2、part3、part4
@@ -614,12 +610,6 @@ def wait_for_all_arms_status(desired_status, robot_ips, timeout=60):
 def ping_ip(ip_address):
     """
     Ping指定的IP地址，返回连通性结果
-
-    Args:
-        ip_address (str): 要测试的IP地址或主机名
-
-    Returns:
-        str: "IP成功" 或 "IP失败"
     """
     # 根据操作系统选择合适的ping参数[2,4,7](@ref)
     operating_system = platform.system().lower()
@@ -695,7 +685,7 @@ def filter_reachable_ips(ip_list):
 
 def filter_configs_by_reachable_ips(configs, reachable_ips):
     """
-    根据可达IP列表过滤配置[6](@ref)
+    根据可达IP列表过滤配置
     """
     filtered_configs = []
     reachable_set = set(reachable_ips)
@@ -717,19 +707,7 @@ def main():
     主函数 - 完整的机械臂控制流程
     """
     # 读取所有机械臂配置
-    # configs, robot_ips = read_configs_from_csv("ips_center.csv")  # 中心点一个机器
-    # configs, robot_ips = read_configs_from_csv("test_12_17.csv")       # part3
     configs, robot_ips = read_configs_from_csv("test_12_12.csv")       # part4,part1
-    # configs, robot_ips = read_configs_from_csv("test_1.csv")
-    # configs, robot_ips = read_configs_from_csv("test_8_.csv")
-    # configs, robot_ips = read_configs_from_csv("test.csv")
-
-    """
-    第一排：ips_1.csv           第二排：ips_2.csv               第三排：ips_3.csv
-    左边三列：ips_zuo_3.csv      中间5列：ips_middle_5.csv       右边3列：ips_you_3.csv
-    交换机列：ips_middle_1.csv
-    备份： 全部数据：robot_ips.csv      测试数据：test.csv（需删减的话复制过来删减）
-    """
 
     if not configs:
         print("没有读取到有效的机械臂配置，程序退出。")
